@@ -8,9 +8,6 @@ from influxdb import InfluxDBClient
 def temp(note):
     return note.split()[-1]
 
-print("Connecting to:")
-print(os.getenv('INPORT', 'uhoh'))
-
 connection = InfluxDBClient( \
     host=os.getenv('INHOST', 'localhost'), \
     port=int(os.getenv('INPORT', 8086)), \
@@ -38,10 +35,10 @@ def send(record):
         # updates - thermostat
         if 'temperature changed to' in event.what:
             newjson['state.temperatureInput1'] = float(temp(event.what))
-            newjson['state.temperatureString'] = event.what
+            newjson['state.temperatureString'] = str(temp(event.what))
         elif 'humidity changed to' in event.what:
             newjson['state.humidityInput1'] = float(temp(event.what))
-            newjson['state.humidityString'] = temp(event.what)
+            newjson['state.humidityString'] = str(temp(event.what))
         elif 'INSTEON' in record.event:
             # lights on off dim: set state
             if (event.what == "on to"):
