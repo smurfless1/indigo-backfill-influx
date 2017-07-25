@@ -33,13 +33,8 @@ def send(record):
 
         # NOAA weather doesn't log on my box. Bummer!
         # updates - thermostat
-        if 'temperature changed to' in event.what:
-            newjson['state.temperatureInput1'] = float(temp(event.what))
-            newjson['state.temperatureString'] = str(temp(event.what))
-        elif 'humidity changed to' in event.what:
-            newjson['state.humidityInput1'] = float(temp(event.what))
-            newjson['state.humidityString'] = str(temp(event.what))
-        elif 'INSTEON' in record.event:
+        measurement = 'device_changes'
+        if 'INSTEON' in record.event:
             # lights on off dim: set state
             if (event.what == "on to"):
                 newjson['onState'] = True
@@ -50,11 +45,56 @@ def send(record):
             if (event.what == "off"):
                 newjson['onState'] = False
                 newjson['state.onOffState'] = False
+            # TODO this works for things with "thermostat" in the name, which is kind of not super general
+            if ('thermostat' in event.name):
+                measurement = 'thermostat_changes'
+                if 'turn auto on' in event.what:
+                    pass
+                elif 'turn fan auto on' in event.what:
+                    pass
+
+                elif 'set cool setpoint' in event.what or 'cool setpoint changed to' in event.what:
+                    try:
+                        newjson['coolSetpoint'] = float(event.what.split()[:-1])
+                        newjson['state.setpointCool'] = float(event.what.split()[:-1])
+                    except:
+                        pass
+                elif 'set heat setpoint' in event.what or 'heat setpoint changed to' in event.what:
+                    try:
+                        newjson['heatSetpoint'] = float(event.what.split()[:-1])
+                        newjson['state.setpointHeat'] = float(event.what.split()[:-1])
+                    except:
+                        pass
+                elif 'temperature changed to' in event.what:
+                    newjson['state.temperatureInput1'] = float(temp(event.what))
+                    newjson['state.temperatureString'] = str(temp(event.what))
+                elif 'humidity changed to' in event.what:
+                    newjson['state.humidityInput1'] = float(temp(event.what))
+                    newjson['state.humidityString'] = str(temp(event.what))
+
+                try:
+                    # not sure if its heating or cooling season, so:
+                    newjson['coolIsOn'] = newjson['onState']
+                    newjson['state.hvacCoolIsOn'] = newjson['onState']
+                    newjson['heatIsOn'] = newjson['onState']
+                    newjson['state.hvacHeatIsOn'] = newjson['onState']
+                except:
+                    pass
+
+                try:
+                    del newjson['onState']
+                except:
+                    pass
+                try:
+                    del newjson['state.onOffState']
+                except:
+                    pass
+
         # uh... more.
 
         json_body=[
             {
-                'measurement': 'device_changes',
+                'measurement': measurement,
                 'time': record.readtime().strftime('%Y-%m-%dT%H:%M:%SZ'),
                 'tags' : newtags,
                 'fields':  newjson
