@@ -90,6 +90,8 @@ def send(record):
         measurement = 'device_changes'
         if 'thermostat' in newjson['name']:
             measurement = 'thermostat_changes'
+        if 'temperatureC' in newjson.keys():
+            measurement = 'weather_changes'
         json_body=[
             {
                 'measurement': measurement,
