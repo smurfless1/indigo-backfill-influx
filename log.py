@@ -1,10 +1,20 @@
+import json
 import re
 from datetime import datetime
 from itertools import chain
 from pathlib import Path
 from typing import List, Optional
+from indigo import InfluxEvent, InfluxFields, InfluxTag
 
-logdir = Path("/Library/Application Support/Perceptive Automation/Indigo 7/Logs")
+logdir = Path("/Library/Application Support/Perceptive Automation/Indigo 7.4/Logs")
+
+ON_OFF_STATE = "state.onOffState"
+DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def last_member(note: str):
+    """Honestly I don't remember why I needed this."""
+    return note.split()[-1]
 
 
 class ReceivedEvent:
@@ -51,7 +61,7 @@ class IndigoRecord:
         """Constructor."""
         try:
             (self.time, self.event, self.notes) = line.split("\t")
-        except IndexError:
+        except (ValueError, IndexError):
             self.time = ""
             self.event = ""
             self.notes = ""
@@ -59,6 +69,59 @@ class IndigoRecord:
     def __str__(self) -> str:
         """String representation."""
         return "IndigoRecord"
+
+    def json_for_insteon_events(self):
+        event = self.read_event()
+        if event is None:
+            return None
+
+        on: Optional[bool] = None
+        measurement: str = "device_changes"
+        cool: Optional[float] = None
+        heat: Optional[float] = None
+        temperature: Optional[float] = None
+        humidity: Optional[float] = None
+        brightness: Optional[float] = None
+
+        # NOAA weather doesn't log on my box. Bummer!
+        # updates - thermostat
+        if "INSTEON" in self.event:
+            # lights on off dim: set state
+            if "on to" in event.what:
+                brightness = float(last_member(event.what))
+                if brightness == 0.0:
+                    on = False
+                else:
+                    on = True
+            elif event.what == "on":
+                on = True
+            elif event.what == "off":
+                on = False
+
+            elif "set cool setpoint" in event.what or "cool setpoint changed to" in event.what:
+                cool = float(event.what.split()[-1])
+                measurement = "thermostat_changes"
+            elif "set heat setpoint" in event.what or "heat setpoint changed to" in event.what:
+                heat = float(event.what.split()[-1])
+                measurement = "thermostat_changes"
+            elif "temperature changed to" in event.what:
+                temperature = float(last_member(event.what))
+                measurement = "thermostat_changes"
+            elif "humidity changed to" in event.what:
+                humidity = float(last_member(event.what))
+                measurement = "thermostat_changes"
+
+        ie = InfluxEvent(measurement=measurement, time=self.time, tags=InfluxTag(name=event.name),
+                         fields=InfluxFields(
+                             cool_setpoint=cool,
+                             heat_setpoint=heat,
+                             temperature=temperature,
+                             humidity=humidity,
+                             on=on,
+                             brightness=brightness
+                         ))
+
+        return ie.to_dict()
 
 
 class IndigoLogFile:

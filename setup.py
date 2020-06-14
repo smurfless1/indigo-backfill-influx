@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from setuptools import setup, find_packages
+from setuptools import setup
 
 
 setup(
@@ -13,11 +13,14 @@ setup(
     include_package_data=True,
     python_requires='>=3.7',
     install_requires=[
-        'influxdb',
+        'betterproto',
+        'click',
+        'influxdb-client',
     ],
     extras_require={
         'dev': [
             'behave',
+            'betterproto[compiler]',
             'flake8',
             'invoke',
             'tox',
@@ -25,8 +28,7 @@ setup(
             'pytest'
         ]
     },
-    entry_points='''
-        [console_scripts]
-        indigo-backfill-influx=backfill.py
-    ''',
+    entry_points={
+        'console_scripts': ['indigo-backfill-influx=backfill:main'],
+    }
 )

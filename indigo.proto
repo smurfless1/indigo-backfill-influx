@@ -1,0 +1,29 @@
+syntax = "proto3";
+import "google/protobuf/wrappers.proto";
+package indigo;
+
+message InfluxTag {
+    google.protobuf.StringValue name = 1;
+    google.protobuf.StringValue folder = 2;
+}
+
+message InfluxEvent {
+    google.protobuf.StringValue measurement = 1;
+    google.protobuf.StringValue time = 2;
+    InfluxTag tags = 3;
+    InfluxFields fields = 4;
+}
+
+message DeviceChange {
+    google.protobuf.StringValue name = 1;
+}
+
+message InfluxFields {
+    google.protobuf.BoolValue on = 1;
+    google.protobuf.FloatValue brightness = 11;
+    google.protobuf.FloatValue coolSetpoint = 20;
+    google.protobuf.FloatValue heatSetpoint = 21;
+    google.protobuf.FloatValue temperature = 22;
+    google.protobuf.FloatValue humidity = 23;
+}
+

@@ -7,14 +7,18 @@ back to it. So here it is. I'm refactoring it to be just a little bit more predi
 This takes the Indigo logs from my local folder and sends them to my InfluxDB VMware instance
 but it makes pretty graphs, and might be useful to someone other than me some day.
 """
-import json
-from typing import Any, Dict, List, Tuple
+import time
 
 import click
-from influxdb import InfluxDBClient
-from influxdb.exceptions import InfluxDBClientError
+import json
+from influxdb_client import InfluxDBClient
+from influxdb_client.client.write_api import SYNCHRONOUS, WriteApi
 
-from .log import IndigoLog, IndigoRecord, ReceivedEvent
+from typing import Any, Dict, List
+
+from influx_connection_state import Influx20ConnectionState
+from log import IndigoLog, IndigoRecord, ReceivedEvent
+from indigo import InfluxEvent
 
 ON_OFF_STATE = "state.onOffState"
 
@@ -24,11 +28,12 @@ FLOAT_KEYS = "lastSuccessfulComm id lastChanged buttonGroupCount folderId bright
 STRING_KEYS = (
     "PanicState.ambulance PanicState.duress LEDBypass hvacFanMode hvacFanModeIsAlwaysOn LEDMemory KeypadChime.enabled "
     "hvacFanIsOn hvacDehumidifierIsOn KeypadChime.disabled state.tripped humidityInputsAll state.open state.closed "
-    "hvacCoolerIsOn hvacHeaterIsOn KeypadChime ArmedState.stay LastChangedTimer ArmedState ArmedState.away ArmedState.disarmed "
-    "bypass.bypassed bypass.nobypass humidityInput1".split()
+    "hvacCoolerIsOn hvacHeaterIsOn KeypadChime ArmedState.stay LastChangedTimer ArmedState ArmedState.away "
+    "ArmedState.disarmed bypass.bypassed bypass.nobypass humidityInput1".replace(".", "_").split()
 )
 INT_KEYS = "configured onOffState".split()
 BOOL_KEYS = "notbool enabled".split()
+influx_state: Influx20ConnectionState
 
 
 def temp(note: str):
@@ -59,35 +64,37 @@ def value_of(kk: str, vv: str) -> Any:
 
 def json_for_list(record: IndigoRecord) -> List[Dict]:
     """Refactor - return a list of objects."""
-    newjson = {}
+    newjson = []
     # Write existing debug info back - more data available.
-    if record.notes.startswith("["):
-        oldjson = json.loads(record.notes)
-        newjson = {}
-        if "name" not in oldjson[0].keys():
-            return []
-        for kk in oldjson[0].keys():
-            vv = oldjson[0][kk]
-            try:
-                newjson[kk] = value_of(kk, vv)
-            except ValueError:
-                pass
-        newjson["time"] = record.read_time().strftime(DATE_FORMAT)
-        newjson = [newjson]
+    oldjson = json.loads(record.notes)
+
+    for elt in oldjson:
+        for key in elt["fields"].keys():
+            key: str
+            newkey = key.replace(".", "_")
+            if key != newkey:
+                elt["fields"][newkey] = elt["fields"][key]
+                del elt["fields"][key]
+        ie = InfluxEvent().from_dict(value=dict(time=record.read_time().strftime(DATE_FORMAT), **elt))
+        newjson = [ie.to_dict()]
+        break
 
     return newjson
 
 
 def json_for_object(record: IndigoRecord) -> List[Dict]:
     """Refactor - return a list of objects."""
+    raise ValueError("Nope!")
+    '''
     oldjson = json.loads(record.notes)
     newjson = {}
+    ie = InfluxEvent().from_dict(value=dict(time=record.read_time().strftime(DATE_FORMAT), **oldjson))
     if "name" not in oldjson.keys():
         return [{}]
     for kk in oldjson.keys():
         vv = oldjson[kk]
         try:
-            newjson[kk] = value_of(kk, vv)
+            newjson[kk.replace(".", "_")] = value_of(kk, vv)
         except ValueError:
             pass
     newtags = {"name": newjson["name"]}
@@ -96,11 +103,13 @@ def json_for_object(record: IndigoRecord) -> List[Dict]:
         measurement = "thermostat_changes"
     if "temperatureC" in newjson.keys():
         measurement = "weather_changes"
-    json_body = [{"measurement": measurement, "time": record.read_time().strftime(DATE_FORMAT), "tags": newtags, "fields": newjson}]
+    json_body = [{"measurement": measurement, "time": record.read_time().strftime(DATE_FORMAT), "tags": newtags,
+                  "fields": newjson}]
     return json_body
+    '''
 
 
-def send_new_json_with_retry(newjson: List[Dict], connection: InfluxDBClient):
+def send_new_json_with_retry(newjson: List[Dict]):
     """
     So there's this thing with Influx DB, where it pisses you off.
     It rejects your write if someone already wrote a point with another format.
@@ -109,106 +118,15 @@ def send_new_json_with_retry(newjson: List[Dict], connection: InfluxDBClient):
     This does that whole disaster.
 
     :param newjson: The new json to send
-    :param connection: The client to send to
     :return:
     """
-    unsent = True
-    while unsent:
-        try:
-            connection.write_points(newjson, time_precision="s")
-            unsent = False
-        except InfluxDBClientError as e:
-            # print(str(e))
-            field = json.loads(e.content)["error"].split('"')[1]
-            # json.loads(e.content)["error"].split('"')[3]
-            retry = json.loads(e.content)["error"].split('"')[4].split()[7]
-            if retry == "integer":
-                retry = "int"
-            if retry == "string":
-                retry = "str"
-            newcode = "%s(%s)" % (retry, str(newjson[0]["fields"][field]))
-            # print(newcode)
-            newjson[0]["fields"][field] = eval(newcode)  # nosec B307
+    global influx_state
+    print(newjson)
+    time.sleep(2)
+    influx_state.api.write(influx_state.bucket, influx_state.org, newjson, time_precision="s")
 
 
-def json_for_insteon_events(record: IndigoRecord) -> Tuple[Dict, List[Dict]]:
-    event = record.read_event()
-    if event is None:
-        return {}, []
-
-    newjson = {"name": event.name}
-    newtags = {"name": event.name}
-
-    # NOAA weather doesn't log on my box. Bummer!
-    # updates - thermostat
-    measurement = "device_changes"
-    if "INSTEON" in record.event:
-        # lights on off dim: set state
-        if event.what == "on to":
-            newjson["onState"] = True
-            newjson[ON_OFF_STATE] = True
-        if event.what == "on":
-            newjson["onState"] = True
-            newjson[ON_OFF_STATE] = True
-        if event.what == "off":
-            newjson["onState"] = False
-            newjson[ON_OFF_STATE] = False
-        # TODO this works for things with "thermostat" in the name, which is kind of specific to my house
-        if "thermostat" in event.name:
-            measurement = "thermostat_changes"
-            modify_json_for_thermostat_event(event, newjson)
-
-    json_body = [{"measurement": measurement, "time": record.read_time().strftime(DATE_FORMAT), "tags": newtags, "fields": newjson}]
-    return newjson, json_body
-
-
-def modify_json_for_thermostat_event(event: ReceivedEvent, newjson: Dict):
-    """
-    Form a useful json event from thermostat log entries.
-
-    Pass by reference means we're operating on the newjson dict directly, no return required.
-    :param event: The event to get interesting stuff from.
-    :param newjson: The new json to be written to InfluxDB
-    """
-    if "set cool setpoint" in event.what or "cool setpoint changed to" in event.what:
-        try:
-            newjson["coolSetpoint"] = float(event.what.split()[:-1])
-            newjson["state.setpointCool"] = float(event.what.split()[:-1])
-        except KeyError:
-            pass
-    elif "set heat setpoint" in event.what or "heat setpoint changed to" in event.what:
-        try:
-            newjson["heatSetpoint"] = float(event.what.split()[:-1])
-            newjson["state.setpointHeat"] = float(event.what.split()[:-1])
-        except KeyError:
-            pass
-    elif "temperature changed to" in event.what:
-        newjson["state.temperatureInput1"] = float(temp(event.what))
-        newjson["state.temperatureString"] = str(temp(event.what))
-    elif "humidity changed to" in event.what:
-        newjson["state.humidityInput1"] = float(temp(event.what))
-        newjson["state.humidityString"] = str(temp(event.what))
-
-    try:
-        # not sure if its heating or cooling season, so:
-        newjson["coolIsOn"] = newjson["onState"]
-        newjson["state.hvacCoolIsOn"] = newjson["onState"]
-        newjson["heatIsOn"] = newjson["onState"]
-        newjson["state.hvacHeatIsOn"] = newjson["onState"]
-    except KeyError:
-        pass
-    try:
-        del newjson["onState"]
-    except KeyError:
-        pass
-    try:
-        del newjson[ON_OFF_STATE]
-    except KeyError:
-        pass
-    # remember pass by reference means we're operating on the newjson dict directly, no return.
-
-
-def send_record(record: IndigoRecord, connection: InfluxDBClient) -> None:
+def send_record(record: IndigoRecord) -> None:
     """
     Send the current record to influxdb.
 
@@ -221,44 +139,43 @@ def send_record(record: IndigoRecord, connection: InfluxDBClient) -> None:
     # Things that are already JSON lists:
     if record.notes.startswith("["):
         newjson = json_for_list(record)
-        if not newjson:
+        if not newjson or len(newjson[0]["fields"].keys()) < 1:
             return
-        send_new_json_with_retry(newjson, connection)
+        return send_new_json_with_retry(newjson)
 
     # things that are already JSON objects:
     elif record.notes.startswith("{"):
         newjson = json_for_object(record)
-        send_new_json_with_retry(newjson, connection)
+        return send_new_json_with_retry(newjson)
 
     # for the general case - like Insteon on off events, thermostat changes, etc.
     try:
-        newjson, json_body = json_for_insteon_events(record)
-        # TODO keep an eye on this 2 thing, why did I need this again?
-        if len(newjson.keys()) > 2:
-            print(json.dumps(json_body))
-            connection.write_points(json_body, time_precision="s")
+        newjson = record.json_for_insteon_events()
+        if not newjson or len(newjson["fields"].keys()) == 0:
+            return
+        send_new_json_with_retry([newjson])
 
     except Exception as e:
         print("Error doing something. Anything. Continuing!")
+        print(record.notes)
         print(str(e))
 
 
 @click.command()
-@click.option("--influxdb-host", type=str, default="localhost", show_default=True, env="INHOST", help="The influxdb host to connect to.")
-@click.option("--influxdb-port", type=int, default=8086, show_default=True, env="INPORT", help="The influxdb port to connect to.")
-@click.option("--influxdb-user", type=int, default="indigo", show_default=True, env="INUSER", help="The influxdb user to connect as.")
-@click.option("--influxdb-pass", type=str, default="indigo", show_default=True, env="INPASS", help="The influxdb password.")
-@click.option("--influxdb-database", type=str, default="indigo", show_default=True, env="INDB", help="The influxdb database.")
-def main(influxdb_host, influxdb_port, influxdb_user, influxdb_pass, influxdb_database):
-    connection = InfluxDBClient(
-        host=influxdb_host, port=influxdb_port, username=influxdb_user, password=influxdb_pass, database=influxdb_database
-    )
-
+@click.option("--token", type=str, envvar="INFLUX_TOKEN", required=True)
+@click.option("--org", type=str, envvar="INFLUX_ORG", required=True)
+@click.option("--bucket", type=str, envvar="INFLUX_BUCKET", required=True)
+@click.option("--host", type=str, envvar="INFLUX_HOST", required=True)
+def main(token, org, bucket, host):
+    global influx_state
+    client = InfluxDBClient(url=host, token=token)
+    write_api: WriteApi = client.write_api(write_options=SYNCHRONOUS)
+    influx_state = Influx20ConnectionState(token=token, org=org, bucket=bucket, api=write_api)
     il = IndigoLog()
 
     for x in il.records():
         try:
-            send_record(x, connection)
+            send_record(x)
         except json.JSONDecodeError:
             pass
         except Exception as e:
