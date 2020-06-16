@@ -7,18 +7,20 @@ back to it. So here it is. I'm refactoring it to be just a little bit more predi
 This takes the Indigo logs from my local folder and sends them to my InfluxDB VMware instance
 but it makes pretty graphs, and might be useful to someone other than me some day.
 """
-import time
-
 import click
 import json
+import time
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.write_api import SYNCHRONOUS, WriteApi
+from typing import Dict, List
+from .log import IndigoLog, IndigoRecord
 
-from typing import Any, Dict, List
+try:
+    from influx_connection_state import Influx20ConnectionState
+except ImportError:
+    from .influx_connection_state import Influx20ConnectionState
 
-from influx_connection_state import Influx20ConnectionState
-from log import IndigoLog, IndigoRecord, ReceivedEvent
-from indigo import InfluxEvent
+from indigo_protobuf.indigo_influx_outbound import InfluxOutbound, make_unknown_message
 
 ON_OFF_STATE = "state.onOffState"
 
@@ -36,77 +38,20 @@ BOOL_KEYS = "notbool enabled".split()
 influx_state: Influx20ConnectionState
 
 
-def temp(note: str):
-    """Honestly I don't remember why I needed this."""
-    return note.split()[-1]
-
-
-def value_of(kk: str, vv: str) -> Any:
-    """Dynamically cast a type to its intended in-memory type."""
-    if vv is None:
-        raise ValueError("nope")
-    elif isinstance(vv, bool):
-        return bool(vv)
-    elif isinstance(vv, dict):
-        raise ValueError("nope")
-    if kk in FLOAT_KEYS:
-        return float(vv)
-    if kk in STRING_KEYS:
-        return str(vv)
-    if kk in INT_KEYS:
-        return int(vv)
-    if kk in BOOL_KEYS:
-        return bool(vv)
-    if ".num" in kk:
-        return float(vv)
-    return vv
-
-
 def json_for_list(record: IndigoRecord) -> List[Dict]:
     """Refactor - return a list of objects."""
     newjson = []
     # Write existing debug info back - more data available.
-    oldjson = json.loads(record.notes)
-
-    for elt in oldjson:
-        for key in elt["fields"].keys():
-            key: str
-            newkey = key.replace(".", "_")
-            if key != newkey:
-                elt["fields"][newkey] = elt["fields"][key]
-                del elt["fields"][key]
-        ie = InfluxEvent().from_dict(value=dict(time=record.read_time().strftime(DATE_FORMAT), **elt))
-        newjson = [ie.to_dict()]
-        break
+    loaded = json.loads(record.notes)
+    if isinstance(loaded, list):
+        for elt in loaded:
+            msg = make_unknown_message(elt)
+            out = InfluxOutbound(msg)
+            if out.sendable():
+                # double workaround, but whatever
+                newjson.append(out.event.to_dict())
 
     return newjson
-
-
-def json_for_object(record: IndigoRecord) -> List[Dict]:
-    """Refactor - return a list of objects."""
-    raise ValueError("Nope!")
-    '''
-    oldjson = json.loads(record.notes)
-    newjson = {}
-    ie = InfluxEvent().from_dict(value=dict(time=record.read_time().strftime(DATE_FORMAT), **oldjson))
-    if "name" not in oldjson.keys():
-        return [{}]
-    for kk in oldjson.keys():
-        vv = oldjson[kk]
-        try:
-            newjson[kk.replace(".", "_")] = value_of(kk, vv)
-        except ValueError:
-            pass
-    newtags = {"name": newjson["name"]}
-    measurement = "device_changes"
-    if "thermostat" in newjson["name"]:
-        measurement = "thermostat_changes"
-    if "temperatureC" in newjson.keys():
-        measurement = "weather_changes"
-    json_body = [{"measurement": measurement, "time": record.read_time().strftime(DATE_FORMAT), "tags": newtags,
-                  "fields": newjson}]
-    return json_body
-    '''
 
 
 def send_new_json_with_retry(newjson: List[Dict]):
@@ -139,13 +84,6 @@ def send_record(record: IndigoRecord) -> None:
     # Things that are already JSON lists:
     if record.notes.startswith("["):
         newjson = json_for_list(record)
-        if not newjson or len(newjson[0]["fields"].keys()) < 1:
-            return
-        return send_new_json_with_retry(newjson)
-
-    # things that are already JSON objects:
-    elif record.notes.startswith("{"):
-        newjson = json_for_object(record)
         return send_new_json_with_retry(newjson)
 
     # for the general case - like Insteon on off events, thermostat changes, etc.
