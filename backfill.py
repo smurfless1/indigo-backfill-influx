@@ -13,7 +13,7 @@ import time
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.write_api import SYNCHRONOUS, WriteApi
 from typing import Dict, List
-from .log import IndigoLog, IndigoRecord
+from log import IndigoLog, IndigoRecord
 
 try:
     from influx_connection_state import Influx20ConnectionState
@@ -84,6 +84,8 @@ def send_record(record: IndigoRecord) -> None:
     # Things that are already JSON lists:
     if record.notes.startswith("["):
         newjson = json_for_list(record)
+        if newjson == []:
+            return
         return send_new_json_with_retry(newjson)
 
     # for the general case - like Insteon on off events, thermostat changes, etc.
